@@ -10,6 +10,7 @@
 #include <time.h> 
 #include <pthread.h>
 #include <semaphore.h>
+#include <signal.h>
 
 #define PORT 5000
 #define BACKLOG 50
@@ -33,6 +34,21 @@ struct worker workers[MAX_WORKERS];
 int workers_count = 0;
 pthread_mutex_t workers_change;
 sem_t idle_workers;
+void exit_handler(int);
+
+void exit_handler(int sig) {
+    char exit_message[1024];
+    memset(exit_message, 0, sizeof(exit_message));
+    snprintf(exit_message, sizeof(exit_message), "%s", "quit");
+
+    for(int i = 0; i < workers_count; i++){
+        send(workers[i].data.socket_id, exit_message, sizeof(exit_message) + 1, 0);
+    }
+    sleep(1);
+    printf("\nSever desligando!\n");
+    fflush(stdout);
+    exit(1);
+}
 
 int receive_message(int socket_id, char* buffer){
     int i = 0, n;
@@ -137,7 +153,7 @@ void *route_sockets(void *received_socket){
         fflush(stdout);
         close(connected_socket->socket_id);
     }
-    
+    return 0;
 }
 
 int main(int argc, char *argv[]){
@@ -147,6 +163,8 @@ int main(int argc, char *argv[]){
     struct socket_data *connected_socket;
 
     pthread_mutex_init(&workers_change, NULL);
+
+    signal(SIGINT, exit_handler);
 
     //Thread que vai definir quem é servidor e quem é cliente
     pthread_t routing_thread;
