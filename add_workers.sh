@@ -1,6 +1,8 @@
 #!/bin/bash
 
-ip=$(hostname -I)
+iparray=$(hostname -I)
+ip=${iparray[0]}
+
 workers_amount=$1
 
 if [ ! -n "$workers_amount" ]

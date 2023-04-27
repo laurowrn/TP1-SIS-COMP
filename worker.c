@@ -16,6 +16,20 @@
 #define BUFFER_SIZE 1024
 #define PORT 5000
 
+int receive_message(int socket_id, char* buffer){
+    int i = 0, n;
+    while((n = recv(socket_id, &buffer[i], 1, 0)) > 0){
+        if(buffer[i] == '\0'){
+            break;
+        }
+        i++;
+    }
+    if(n < 0){
+        return n;
+    }
+    return i;
+}
+
 double perform_operation(const char *operation, double a, double b) {
     if (strcmp(operation, "add") == 0) {
         return a + b;
@@ -70,7 +84,7 @@ int main(int argc, char *argv[]) {
 
         /* Receive request */
         memset(buffer, 0, BUFFER_SIZE);
-        if (recv(sockfd, buffer, BUFFER_SIZE, 0) < 0) {
+        if (recv(sockfd, buffer, sizeof(buffer) + 1, 0) < 0) {
             perror("Error receiving request");
             exit(EXIT_FAILURE);
         }
@@ -95,8 +109,8 @@ int main(int argc, char *argv[]) {
             perror("Error sending result");
             exit(EXIT_FAILURE);
         }
-    }
 
+    }
     /* Close the socket */
     close(sockfd);
 

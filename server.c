@@ -44,7 +44,7 @@ void exit_handler(int sig) {
     for(int i = 0; i < workers_count; i++){
         send(workers[i].data.socket_id, exit_message, sizeof(exit_message) + 1, 0);
     }
-    sleep(1);
+    sleep(2);
     printf("\nSever desligando!\n");
     fflush(stdout);
     exit(1);
@@ -88,12 +88,13 @@ void *route_sockets(void *received_socket){
         memset(operation, 0, sizeof(operation));
 
         char result[1024];
-        memset(result, 0, sizeof(result)); 
+        memset(result, 0, sizeof(result));
 
         if (receive_message(connected_socket->socket_id, operation) < 0) {
             perror("Error receiving request");
             exit(EXIT_FAILURE);
         }
+        
 
         if(sem_trywait(&idle_workers) == 0){
             pthread_mutex_lock(&workers_change);
@@ -105,7 +106,9 @@ void *route_sockets(void *received_socket){
             workers[worker_index].state = BUSY;
             pthread_mutex_unlock(&workers_change);
 
+            
             send(workers[worker_index].data.socket_id, operation, sizeof(operation) + 1, 0);
+
 
             if (receive_message(workers[worker_index].data.socket_id, result) < 0) {
                 perror("Error receiving result");
@@ -114,8 +117,9 @@ void *route_sockets(void *received_socket){
 
             pthread_mutex_lock(&workers_change);
             workers[worker_index].state = IDLE;
-            pthread_mutex_unlock(&workers_change);
             sem_post(&idle_workers);
+            pthread_mutex_unlock(&workers_change);
+
             send(connected_socket->socket_id, result, sizeof(result) + 1, 0);
             close(connected_socket->socket_id);
         }else{
@@ -125,7 +129,7 @@ void *route_sockets(void *received_socket){
         }
     }else if(strcmp(socket_type, "worker") == 0){
         if(workers_count < MAX_WORKERS){
-            pthread_mutex_unlock(&workers_change);
+            pthread_mutex_lock(&workers_change);
             struct socket_data *worker_data = (struct socket_data *) malloc(sizeof(struct socket_data));
             worker_data->socket_address = (struct sockaddr_in *) malloc(sizeof(struct sockaddr_in));
             worker_data->socket_address = connected_socket->socket_address;
@@ -141,13 +145,13 @@ void *route_sockets(void *received_socket){
             printf("Worker socket connected.\n");
             fflush(stdout);
             workers_count++;
-            pthread_mutex_unlock(&workers_change);
             sem_post(&idle_workers);
+            pthread_mutex_unlock(&workers_change);
         }else{
             printf("Worker tried to connect, but the workers buffer is full.\n");
             fflush(stdout);
+            close(connected_socket->socket_id);
         }
-        
     }else{
         printf("Unknow socket tried to connect.\n");
         fflush(stdout);

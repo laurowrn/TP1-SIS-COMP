@@ -67,17 +67,15 @@ int main(int argc, char *argv[]){
     char *second_number = argv[4];
 
 
-
     snprintf(send_buffer, sizeof(send_buffer), "%s", "client");
     send(server_id, send_buffer, strlen(send_buffer) + 1, 0);
-
 
     snprintf(send_buffer, sizeof(send_buffer), "%s %s %s", operation, first_number, second_number);
     send(server_id, send_buffer, strlen(send_buffer) + 1, 0);
 
 
     if (receive_message(server_id, result) < 0) {
-        perror("Error receiving request");
+        perror("Error receiving result");
         exit(EXIT_FAILURE);
     }
 
