@@ -18,38 +18,50 @@
 
 enum worker_state {IDLE, BUSY};
 
-    //Struct para identificar socket - idependente se é worker ou server
+//Struct para identificar socket - idependente se e worker ou server
 struct socket_data{
     int socket_id;
     struct sockaddr_in *socket_address;
 };
 
+//Struct para o worker contendo uma struct socket_data e um estado que 
+//indica se o worker ta ocioso ou trabalhando
 struct worker{
     struct socket_data data;
     enum worker_state state;
 };
 
-//Variáveis dos workers
+//Variaveis globais dos workers
+//Vetor de structs de workers
 struct worker workers[MAX_WORKERS];
+//Indicator para o numero de workers
 int workers_count = 0;
+//Mutex para gerenciar o acesso ao vetor de workers
 pthread_mutex_t workers_change;
+//Semaforo que indica o numero de workers disponiveis
 sem_t idle_workers;
-void exit_handler(int);
 
-void exit_handler(int sig) {
+//Funcao para desligar o servidor com a desconexao dos workers
+void exit_handler(int signal) {
     char exit_message[1024];
     memset(exit_message, 0, sizeof(exit_message));
     snprintf(exit_message, sizeof(exit_message), "%s", "quit");
 
+    printf("\nDesconectando workers...\n");
+    fflush(stdout);
     for(int i = 0; i < workers_count; i++){
         send(workers[i].data.socket_id, exit_message, sizeof(exit_message) + 1, 0);
     }
     sleep(2);
-    printf("\nSever desligando!\n");
+
+    printf("\nSever desligando...\n");
     fflush(stdout);
     exit(1);
 }
 
+//Funcao que percorre o buffer recebido byte a byte, terminando a leitura ao 
+//encontrar o caractere nulo, retornando a quantidade de bytes recebidos
+//caso haja um erro, retorna um valor menor que zero
 int receive_message(int socket_id, char* buffer){
     int i = 0, n;
     while((n = recv(socket_id, &buffer[i], 1, 0)) > 0){
@@ -64,7 +76,114 @@ int receive_message(int socket_id, char* buffer){
     return i;
 }
 
-    //Função que determina o comportamento das conexões com o servidor
+//Funcao que executa as operacoes destinadas ao cliente, apos a indetificacao do socket
+//pelo servidor
+void client_socket(struct socket_data *connected_socket){
+    //String para armazenar a operacao
+    char operation[1024];
+    memset(operation, 0, sizeof(operation));
+
+    //String para armazenar o resultado
+    char result[1024];
+    memset(result, 0, sizeof(result));
+
+    //Tenta receber os dados da mensagem de operacao. Caso de errado o servidor encerra
+    if (receive_message(connected_socket->socket_id, operation) < 0) {
+        perror("Error receiving request");
+        exit(EXIT_FAILURE);
+    }
+    
+    //Se receber normalmente a mensagem, tenta acesso ao semaforo dos workers.
+    //Para conseguir entrar precisa ter workers disponiveis, caso contrario a conexao e encerrada -> else
+    //Se o resultado do try_wait for igual a 0, indica que conseguiu acessar,
+    if(sem_trywait(&idle_workers) == 0){
+        //Usa o mutex para evitar condicao de corrida no acesso ao vetor de workers
+        pthread_mutex_lock(&workers_change);
+        //Percore todo o vetor, partindo do elemento zero, ate encontrar um worker ocioso
+        int worker_index = 0;
+        while(workers[worker_index].state != IDLE){
+            worker_index++;
+        }
+        //Quando encontrar, declara que tal worker esta ocupado
+        workers[worker_index].state = BUSY;
+        //Libera o acesso com o unlock
+        pthread_mutex_unlock(&workers_change);
+        
+        // envia para o worker conectado a operacao e os valores a serem calculados
+        send(workers[worker_index].data.socket_id, operation, sizeof(operation) + 1, 0);
+
+        //Recebe o resultado que o worker calculou
+        //Caso de erro, o servidor e encerrado
+        if (receive_message(workers[worker_index].data.socket_id, result) < 0) {
+            perror("Error receiving result");
+            exit(EXIT_FAILURE);
+        }
+        
+        //Mutex que impede que mais de um worker mude seu estado para ocioso, evitando
+        //condicao de corrida de clientes que buscam se conectar com algum worker
+        pthread_mutex_lock(&workers_change);
+        
+        //Atualizacao do estado do worker apos a realizacao da operacao requisitada
+        //pelo cliente
+        workers[worker_index].state = IDLE;
+        sem_post(&idle_workers);
+        pthread_mutex_unlock(&workers_change);
+        
+        //Envia o resultado da operacao para o cliente
+        send(connected_socket->socket_id, result, sizeof(result) + 1, 0);
+    }else{
+        //Caso nao tenha workers disponiveis ao tentar a conexao
+        //Coloca no buffer result, e manda ao cliente a string
+        snprintf(result, sizeof(result), "%s", "No available workers.");
+        send(connected_socket->socket_id, result, sizeof(result) + 1, 0);
+    }
+    //Fecha a conexao com o cliente e libera o seu espaço de memória
+    close(connected_socket->socket_id);
+    free(connected_socket);
+}
+
+//Funcao que executa as operacoes destinadas ao worker, apos a indetificacao do socket
+//pelo servidor
+void worker_socket(struct socket_data *connected_socket) {
+    //Verifica se ainda existem vagas para criar workers, visto que o numero maximo foi limitado
+    if(workers_count < MAX_WORKERS){
+        //Caso seja possivel adicionar, usa o mutex para garantir o acesso exclusivo aos dados do vetor de sockets
+        pthread_mutex_lock(&workers_change);
+        //Declara e inicializa a estrutura necessaria para um novo worker
+        //Primeiro na struct socket_data
+        struct socket_data *worker_data = (struct socket_data *) malloc(sizeof(struct socket_data));
+        worker_data->socket_address = (struct sockaddr_in *) malloc(sizeof(struct sockaddr_in));
+        worker_data->socket_address = connected_socket->socket_address;
+        worker_data->socket_id = connected_socket->socket_id;
+        //Em seguida, na struct worker
+        struct worker *connected_worker = (struct worker*) malloc(sizeof(struct worker));
+
+        //Adiciona os dados ao worker
+        connected_worker->data = *worker_data;
+        //Adiciona o estado de ocioso ao worker
+        connected_worker->state = IDLE;
+
+        //Adiciona o novo worker ao vetor de workers
+        workers[workers_count] = *connected_worker;
+
+        //Printa na tela que o worker foi adicionado
+        printf("Worker socket connected.\n");
+        fflush(stdout);
+        //Adiciona o contador e o semaforo
+        workers_count++;
+        sem_post(&idle_workers);
+        //Libera o mutex pois terminou sua seção crítica
+        pthread_mutex_unlock(&workers_change);
+    }else{
+        //Nao ha espaco no vetor para alocar mais um socket worker, logo sua conexao e 
+        //encerrada
+        printf("Worker tried to connect, but the workers buffer is full.\n");
+        fflush(stdout);
+        close(connected_socket->socket_id);
+    }
+}
+
+//Função que determina o comportamento das conexões com o servidor
 void *route_sockets(void *received_socket){
     char socket_type[1024];
     char send_buffer[1024];
@@ -75,84 +194,23 @@ void *route_sockets(void *received_socket){
     printf("Received connection from %s:%d\n", inet_ntoa(connected_socket->socket_address->sin_addr), ntohs(connected_socket->socket_address->sin_port));
     fflush(stdout);
 
+    //Recebe a primeira mensagem para identificar se qual socket esta tentando se conectar
     if (receive_message(connected_socket->socket_id, socket_type) < 0) {
         perror("Error receiving request");
         exit(EXIT_FAILURE);
     }
 
+    //Verifica se a mensagem recebida vem de um socket worker ou client
     if (strcmp(socket_type, "client") == 0){
         printf("Client socket connected.\n");
+        // printf("Client socket connected with worker %d.\n", connected_socket->socket_id);
         fflush(stdout);
+        client_socket(connected_socket);    
 
-        char operation[1024];
-        memset(operation, 0, sizeof(operation));
-
-        char result[1024];
-        memset(result, 0, sizeof(result));
-
-        if (receive_message(connected_socket->socket_id, operation) < 0) {
-            perror("Error receiving request");
-            exit(EXIT_FAILURE);
-        }
-        
-
-        if(sem_trywait(&idle_workers) == 0){
-            pthread_mutex_lock(&workers_change);
-            int worker_index = 0;
-            while(workers[worker_index].state != IDLE){
-                worker_index++;
-            }
-
-            workers[worker_index].state = BUSY;
-            pthread_mutex_unlock(&workers_change);
-
-            
-            send(workers[worker_index].data.socket_id, operation, sizeof(operation) + 1, 0);
-
-
-            if (receive_message(workers[worker_index].data.socket_id, result) < 0) {
-                perror("Error receiving result");
-                exit(EXIT_FAILURE);
-            }
-
-            pthread_mutex_lock(&workers_change);
-            workers[worker_index].state = IDLE;
-            sem_post(&idle_workers);
-            pthread_mutex_unlock(&workers_change);
-
-            send(connected_socket->socket_id, result, sizeof(result) + 1, 0);
-            close(connected_socket->socket_id);
-        }else{
-            snprintf(result, sizeof(result), "%s", "No available workers.");
-            send(connected_socket->socket_id, result, sizeof(result) + 1, 0);
-            close(connected_socket->socket_id);
-        }
     }else if(strcmp(socket_type, "worker") == 0){
-        if(workers_count < MAX_WORKERS){
-            pthread_mutex_lock(&workers_change);
-            struct socket_data *worker_data = (struct socket_data *) malloc(sizeof(struct socket_data));
-            worker_data->socket_address = (struct sockaddr_in *) malloc(sizeof(struct sockaddr_in));
-            worker_data->socket_address = connected_socket->socket_address;
-            worker_data->socket_id = connected_socket->socket_id;
-
-            struct worker *connected_worker = (struct worker*) malloc(sizeof(struct worker));
-
-            connected_worker->data = *worker_data;
-            connected_worker->state = IDLE;
-
-            workers[workers_count] = *connected_worker;
-
-            printf("Worker socket connected.\n");
-            fflush(stdout);
-            workers_count++;
-            sem_post(&idle_workers);
-            pthread_mutex_unlock(&workers_change);
-        }else{
-            printf("Worker tried to connect, but the workers buffer is full.\n");
-            fflush(stdout);
-            close(connected_socket->socket_id);
-        }
+        worker_socket(connected_socket);
     }else{
+        //Caso a mensagem seja diferente das duas opcoes, a conexao e encerrada
         printf("Unknow socket tried to connect.\n");
         fflush(stdout);
         close(connected_socket->socket_id);
@@ -166,13 +224,16 @@ int main(int argc, char *argv[]){
     //Ponteiro para struct do tipo socket_data
     struct socket_data *connected_socket;
 
+    //Inicializa o mutex
     pthread_mutex_init(&workers_change, NULL);
 
+    //Vincula a função de desligamento à interrupção do servidor
     signal(SIGINT, exit_handler);
 
     //Thread que vai definir quem é servidor e quem é cliente
     pthread_t routing_thread;
 
+    //Criando o semaforo
     if(sem_init(&idle_workers, 0, 0) != 0){
         fprintf(stderr, "Error creating semaphore");
         return 1;
@@ -221,6 +282,5 @@ int main(int argc, char *argv[]){
         //Cria uma thread que vai definir quem é client e quem é worker
         pthread_create(&routing_thread, NULL, route_sockets, (void *) connected_socket);
         pthread_detach(routing_thread);
-        //Atribui o valor do endereço do socket
     }   
 }

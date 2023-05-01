@@ -1,7 +1,6 @@
 #!/bin/bash
 
-iparray=$(hostname -I)
-ip=${iparray[0]}
+ip=$(hostname -I | awk '{print $1}')
 
 workers_amount=$1
 
